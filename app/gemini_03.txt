@@ -1,0 +1,201 @@
+🧩 1. Archivo systick.c
+🔹 Propósito general
+
+Implementa una función de retardo (delay) en microsegundos (µs) utilizando directamente el temporizador del sistema SysTick del microcontrolador ARM Cortex-M.
+
+🔹 Función: void systick_delay_us(uint32_t delay_us)
+🧠 Contexto
+
+El SysTick es un contador decreciente de 24 bits que forma parte del System Timer del núcleo Cortex-M.
+Por defecto:
+
+Se inicializa por HAL para generar interrupciones cada 1 ms.
+
+Registra su valor actual en SysTick->VAL.
+
+El valor máximo (recarga) está en SysTick->LOAD.
+
+Se decrementa automáticamente a la frecuencia del sistema (SystemCoreClock).
+
+⚙️ Funcionamiento paso a paso
+void systick_delay_us(uint32_t delay_us)
+{
+    uint32_t start, current, target, elapsed;
+
+    if (0 == delay_us)
+        return;
+
+
+👉 Si se solicita un retardo nulo, no hace nada.
+
+    start = SysTick->VAL;
+
+
+👉 Guarda el valor inicial del contador (punto de partida).
+
+    target = delay_us * (SystemCoreClock / 1000000UL);
+
+
+👉 Convierte el tiempo deseado en número de ciclos del SysTick.
+Por ejemplo, si el micro corre a 72 MHz:
+
+1 µs → 72 ciclos
+100 µs → 7200 ciclos.
+
+    while (1)
+    {
+        current = SysTick->VAL;
+
+
+👉 Lee continuamente el valor actual del contador.
+
+Luego calcula cuántos ciclos han pasado desde el inicio:
+
+        if (current <= start)
+            elapsed = start - current;
+        else
+            elapsed = SysTick->LOAD + start - current;
+
+
+👉 El SysTick cuenta hacia abajo; por eso:
+
+Si current < start: el contador no dio la vuelta.
+
+Si current > start: el contador se reinició, por lo que se corrige sumando el valor de LOAD.
+
+Por último:
+
+        if (elapsed >= target)
+            break;
+    }
+}
+
+
+👉 Sale del bucle cuando se alcanza el número de ciclos deseado.
+
+⚙️ En resumen
+Etapa	Acción
+1	Calcula los ciclos equivalentes a los µs deseados.
+2	Lee el valor inicial del SysTick.
+3	En bucle, mide el número de ciclos transcurridos.
+4	Sale cuando se cumple el retardo.
+
+⏱️ Esta función bloquea la CPU mientras espera (no devuelve el control hasta cumplir el tiempo).
+
+📘 Uso típico
+systick_delay_us(500);  // Espera 500 microsegundos
+
+
+Es útil para temporizaciones muy cortas (por ejemplo, control de LCD o protocolos de comunicación sincrónicos).
+
+🧩 2. Archivo dwt.h
+🔹 Propósito general
+
+Proporciona un conjunto de funciones inline para medir tiempos de ejecución usando el DWT (Data Watchpoint and Trace), un periférico de depuración del núcleo ARM Cortex-M que permite contar ciclos de CPU de forma precisa.
+
+🔹 Principales funciones
+cycle_counter_init()
+
+Activa el DWT y el conteo de ciclos:
+
+CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;  // Habilita bloque de trazas
+DWT->CYCCNT = 0;                                 // Reinicia contador
+DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;             // Habilita conteo
+
+cycle_counter_reset()
+
+Reinicia el contador de ciclos:
+
+DWT->CYCCNT = 0;
+
+cycle_counter_get()
+
+Lee el valor actual del contador:
+
+return DWT->CYCCNT;
+
+cycle_counter_get_time_us()
+
+Convierte los ciclos a microsegundos:
+
+return (DWT->CYCCNT / (SystemCoreClock / 1000000));
+
+
+👉 Si el micro corre a 72 MHz, 72 ciclos = 1 µs.
+
+📘 Aplicación práctica
+
+En el sistema general, el DWT se usa en app.c para medir:
+
+El tiempo real de ejecución de cada tarea (en µs).
+
+El WCET (Worst Case Execution Time) histórico.
+
+Ejemplo:
+
+cycle_counter_reset();
+task_test_update();
+uint32_t t = cycle_counter_get_time_us();
+
+⚙️ Diferencias con systick_delay_us()
+Característica	systick_delay_us()	DWT
+Tipo de uso	Generar retardos	Medir tiempos
+Bloquea CPU	Sí	No
+Precisión	Alta (depende de SysTick)	Muy alta (ciclo a ciclo)
+Unidad	µs	ciclos o µs
+Uso típico	Esperas cortas (LCD, sensores)	Perfilado de código, WCET
+🧩 3. Archivo board.h
+🔹 Propósito general
+
+Define la configuración específica de la placa utilizada, como pines de LED y botón.
+
+Permite compilar el mismo código para diferentes modelos de boards Nucleo o Discovery sin modificar el código fuente principal.
+
+🔹 Ejemplo para NUCLEO_F103RC (seleccionado)
+#define BTN_A_PIN      B1_Pin
+#define BTN_A_PORT     B1_GPIO_Port
+#define BTN_A_PRESSED  GPIO_PIN_RESET
+#define BTN_A_HOVER    GPIO_PIN_SET
+
+#define LED_A_PIN      LD2_Pin
+#define LED_A_PORT     LD2_GPIO_Port
+#define LED_A_ON       GPIO_PIN_SET
+#define LED_A_OFF      GPIO_PIN_RESET
+
+
+Esto le permite al código de la aplicación usar macros genéricas:
+
+HAL_GPIO_WritePin(LED_A_PORT, LED_A_PIN, LED_A_ON);
+
+
+sin importar qué microcontrolador o placa se está usando.
+
+🧠 4. Relación entre los tres módulos
+Archivo	Función en el sistema	Interacción
+board.h	Define hardware de la placa (botones, LEDs, etc.)	Usado en task_test.c y otros módulos para control de I/O.
+dwt.h	Mide tiempo exacto de ejecución de código	Usado en app.c para calcular g_app_runtime_us y WCET.
+systick.c	Genera retardos por software de µs	Usado en display.c y otros drivers que requieren esperas precisas.
+🧩 5. Resumen visual del flujo
+[SysTick] -----> genera interrupciones 1ms ---> app_update()
+   |                                       |
+   |----> usado también por systick_delay_us() (bloqueante)
+   
+[DWT] ---------> mide tiempo real ---------> WCET, runtime_us
+
+[board.h] -----> define pines físicos -----> usado en display y tareas
+
+🧾 6. Conclusión general
+
+systick_delay_us() implementa delays precisos bloqueantes en µs utilizando el contador SysTick.
+
+dwt.h implementa un cronómetro de alta precisión en ciclos de CPU (útil para medición de ejecución sin bloquear el flujo).
+
+board.h abstrae el hardware de la placa.
+
+En conjunto, estos módulos proporcionan:
+
+Temporización fina (systick_delay_us).
+
+Medición precisa (DWT).
+
+Portabilidad entre boards (board.h).

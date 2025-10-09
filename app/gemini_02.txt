@@ -1,0 +1,183 @@
+🧩 1. Estructura general del sistema
+
+El firmware implementa un sistema bare-metal basado en eventos periódicos, donde:
+
+El SysTick genera interrupciones periódicas cada 1 ms.
+
+Cada interrupción incrementa contadores globales (g_app_tick_cnt, g_task_test_tick_cnt).
+
+El bucle principal (while(1)) ejecuta repetidamente la función app_update(), que chequea si hay ticks pendientes y, si los hay, ejecuta las tareas configuradas (por ahora solo task_test).
+
+⚙️ 2. Funcionamiento por archivo
+🟩 app.c
+
+Es el “núcleo” del sistema: inicializa la aplicación, gestiona el scheduler y mide tiempos de ejecución.
+
+🔸 app_init()
+
+Muestra por consola mensajes informativos usando LOGGER_INFO() (por semihosting).
+
+Inicializa contadores y ciclo DWT:
+
+g_app_cnt = 0;
+g_app_tick_cnt = 0;
+g_task_test_tick_cnt = 0;
+cycle_counter_init();
+
+
+Inicializa las tareas (solo una en task_cfg_list: task_test_init()).
+
+Pone task_dta_list[index].WCET = 0.
+
+📘 En este punto, las variables relevantes tienen los siguientes valores:
+
+Variable	Valor inicial	Unidad	Descripción
+g_app_runtime_us	0	microsegundos	Tiempo total de ejecución de las tareas en el ciclo actual
+task_dta_list[0].WCET	0	microsegundos	Peor tiempo de ejecución observado
+g_task_test_tick_cnt	0	ticks (~ms)	Contador de ticks pendientes de task_test
+🔸 app_update()
+
+Se ejecuta continuamente desde el while(1) del main().
+
+Si g_app_tick_cnt > 0, significa que ha pasado al menos un tick (1 ms):
+
+Se decrementa g_app_tick_cnt.
+
+Se activa la bandera b_time_update_required = true.
+
+Mientras haya ticks pendientes:
+
+Incrementa g_app_cnt.
+
+Pone g_app_runtime_us = 0.
+
+Para cada tarea (solo una en este caso):
+
+cycle_counter_reset();
+task_test_update();
+cycle_counter_time_us = cycle_counter_get_time_us();
+
+
+cycle_counter_get_time_us() devuelve el tiempo de ejecución real (µs) de la tarea.
+
+Se acumula en g_app_runtime_us.
+
+Si supera el valor previo de WCET, se actualiza:
+
+if (task_dta_list[index].WCET < cycle_counter_time_us)
+    task_dta_list[index].WCET = cycle_counter_time_us;
+
+
+Finalmente, vuelve a verificar si g_app_tick_cnt > 0 y repite el ciclo si quedan ticks acumulados.
+
+🟩 task_test.c
+
+Define una tarea simple de demostración, con un retardo interno y salida a display.
+
+🔸 task_test_init()
+
+Muestra mensajes con LOGGER_INFO().
+
+Inicializa contadores:
+
+g_task_test_cnt = 0;
+g_task_test_tick_cnt = 0;
+task_test_dta.tick = 1000;
+
+
+Inicializa el display y escribe:
+
+TdSE Bienvenidos
+Test Nro:
+
+🔸 task_test_update()
+
+Controla la ejecución periódica según ticks:
+
+Si g_task_test_tick_cnt > 0, decrementa uno y marca b_time_update_required = true.
+
+Mientras haya ticks pendientes:
+
+Incrementa g_task_test_cnt.
+
+Llama a task_test_statechart() (lógica de la tarea).
+
+Vuelve a verificar si hay más ticks para procesar.
+
+🔸 task_test_statechart()
+
+Decrementa el contador interno task_test_dta.tick.
+
+Cuando llega a 0:
+
+Lo reinicia a 1000.
+
+Muestra en el display el valor de (g_task_test_cnt / 1000).
+
+🟩 logger.h / logger.c
+
+El logger permite imprimir texto en la consola vía semihosting.
+
+🔸 LOGGER_INFO(...)
+
+Se define así:
+
+#define LOGGER_INFO(...)\
+    LOGGER_LOG("[info] ");\
+    LOGGER_LOG(__VA_ARGS__);\
+    LOGGER_LOG("\n");
+
+
+Y LOGGER_LOG:
+
+#define LOGGER_LOG(...)\
+	__asm("CPSID i");\
+    {\
+        logger_msg_len = snprintf(logger_msg, (LOGGER_CONFIG_MAXLEN - 1), __VA_ARGS__);\
+        logger_log_print_(logger_msg);\
+    }\
+	__asm("CPSIE i");
+
+
+🧠 Esto significa:
+
+Se deshabilitan interrupciones antes de formatear y enviar el mensaje.
+
+Se usa printf() (semihosting) para imprimirlo en la consola.
+
+Luego se rehabilitan las interrupciones.
+
+📊 3. Impacto del LOGGER_INFO() en las variables
+Variable	Unidad	Efecto directo del LOGGER_INFO()	Efecto indirecto o colateral
+g_app_runtime_us	microsegundos (µs)	Aumenta significativamente, ya que LOGGER_INFO() ejecuta llamadas a printf() y snprintf() que consumen mucho tiempo.	Al medirse dentro de app_update(), cada llamada al logger incrementa el tiempo total de ejecución registrado.
+task_dta_list[index].WCET	microsegundos (µs)	Aumenta, ya que se calcula como el máximo histórico de los tiempos de ejecución de cada tarea.	Durante la inicialización (task_test_init()), el uso intensivo de LOGGER_INFO() probablemente establezca el WCET máximo.
+g_task_test_tick_cnt	ticks (≈ milisegundos)	No se ve directamente afectada por el LOGGER_INFO().	Indirectamente puede acumular ticks sin procesar si el logger retrasa la ejecución, provocando que el SysTick interrumpa más veces antes de que la tarea consuma esos ticks.
+🧠 Ejemplo ilustrativo
+
+Supongamos que:
+
+LOGGER_INFO() tarda ≈ 300 µs por mensaje.
+
+task_test_init() usa 6 llamadas a LOGGER_INFO().
+
+Entonces, durante app_init():
+
+g_app_runtime_us ≈ 6 × 300 µs = 1.8 ms (solo por el logger).
+
+task_dta_list[0].WCET se actualizará a ese valor (~1800 µs).
+
+Mientras tanto, el SysTick (1 ms) seguirá generando interrupciones, por lo que g_task_test_tick_cnt podría incrementarse varias veces antes de completarse la inicialización.
+
+En ejecuciones normales (app_update() sin mensajes de log):
+
+g_app_runtime_us será mucho menor (~decenas de µs).
+
+WCET conservará el valor más alto medido durante la inicialización.
+
+g_task_test_tick_cnt oscilará entre 0 y 1 si el sistema está bien sincronizado.
+
+🧾 4. Conclusiones
+Variable	Unidad	Evolución temporal resumida
+g_app_runtime_us	µs	Se reinicia en cada app_update() y aumenta según el tiempo de ejecución real (mayor cuando se usa LOGGER_INFO()).
+task_dta_list[index].WCET	µs	Guarda el mayor tiempo de ejecución observado; aumenta durante el uso intensivo de LOGGER_INFO() en inicialización.
+g_task_test_tick_cnt	ticks (~ms)	Aumenta cada interrupción SysTick; decrece cuando task_test_update() procesa ticks. Puede acumularse si el logger retrasa la ejecución.

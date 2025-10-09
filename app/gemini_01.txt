@@ -1,0 +1,148 @@
+🧩 1. Estructura general
+
+El firmware implementa una aplicación bare-metal basada en el paradigma Event-Triggered System (ETS), donde:
+
+El bucle principal (while(1) en main.c) llama continuamente a app_update().
+
+El SysTick (interrupción periódica cada 1 ms) genera los “ticks” que sincronizan las tareas.
+
+Las tareas (task_test) se ejecutan cuando hay ticks pendientes.
+
+
+⚙️ 2. Flujo de ejecución
+🔹 main.c
+int main(void)
+{
+    HAL_Init();
+    SystemClock_Config();
+    MX_GPIO_Init();
+    MX_USART2_UART_Init();
+
+    app_init();     // Inicializa la aplicación (contador, tareas, etc.)
+
+    while (1)
+    {
+        app_update();   // Ejecuta las tareas periódicas
+    }
+}
+
+
+👉 El firmware arranca los periféricos, luego llama a app_init() una sola vez, y después repite app_update() en bucle.
+
+🔹 stm32f1xx_it.c → SysTick_Handler
+void SysTick_Handler(void)
+{
+    HAL_IncTick();
+    HAL_SYSTICK_IRQHandler();
+}
+
+
+Y dentro de HAL_SYSTICK_IRQHandler() (en app.c):
+
+void HAL_SYSTICK_Callback(void)
+{
+    g_app_tick_cnt++;         // Incrementa el tick de la aplicación
+    g_task_test_tick_cnt++;   // Incrementa el tick de la tarea
+}
+
+
+🕒 Cada 1 ms (por defecto de SysTick) ambos contadores aumentan en 1 unidad.
+
+🔹 app.c
+
+Contiene el núcleo del sistema:
+
+Maneja el scheduler simple.
+
+Registra y mide el tiempo de ejecución (runtime) y el WCET (Worst Case Execution Time) de cada tarea.
+
+app_init()
+
+Inicializa contadores y ciclo de reloj DWT:
+
+g_app_cnt = 0;
+g_app_tick_cnt = 0;
+g_task_test_tick_cnt = 0;
+cycle_counter_init();
+
+
+Llama a task_test_init() para configurar la tarea de prueba.
+
+Inicializa task_dta_list[index].WCET = 0.
+
+app_update()
+
+Comprueba si hay ticks pendientes:
+
+if (g_app_tick_cnt > 0)
+    g_app_tick_cnt--;
+
+
+Si hay al menos un tick, ejecuta todas las tareas registradas (task_test_update()).
+
+Mide su tiempo de ejecución en microsegundos:
+
+cycle_counter_reset();
+(*task_cfg_list[index].task_update)(...);
+cycle_counter_time_us = cycle_counter_get_time_us();
+g_app_runtime_us += cycle_counter_time_us;
+if (task_dta_list[index].WCET < cycle_counter_time_us)
+    task_dta_list[index].WCET = cycle_counter_time_us;
+
+🔹 task_test.c
+
+Implementa una tarea periódica simple que:
+
+Muestra texto en un display LCD.
+
+Actualiza un contador cada tick.
+
+task_test_init()
+
+Inicializa los valores:
+
+g_task_test_cnt = 0;
+g_task_test_tick_cnt = 0;
+task_test_dta.tick = 1000;
+displayInit(DISPLAY_CONNECTION_GPIO_4BITS);
+displayStringWrite("TdSE Bienvenidos");
+
+
+Muestra el mensaje en el display.
+
+task_test_update()
+
+Cada vez que g_task_test_tick_cnt > 0, la decrementa y llama a task_test_statechart().
+
+task_test_statechart()
+
+Decrementa task_test_dta.tick hasta 0.
+
+Cuando llega a 0:
+
+Lo reinicia a 1000.
+
+Muestra el valor del contador g_task_test_cnt / 1000 en el display.
+
+📈 3. Evolución de variables
+Variable	Archivo	Unidad	Descripción	Evolución temporal
+g_app_runtime_us	app.c	microsegundos (µs)	Tiempo total de ejecución de todas las tareas dentro del ciclo de app_update()	Se reinicia a 0 al inicio de cada iteración del bucle principal y se incrementa con el tiempo de ejecución real medido de cada tarea.
+task_dta_list[index].WCET	app.c	microsegundos (µs)	Peor tiempo de ejecución observado de la tarea index desde el inicio del sistema	Inicialmente 0. Si una ejecución tarda más que el máximo previo, se actualiza con el nuevo valor. Monótonamente no decrece.
+g_task_test_tick_cnt	task_test.c	ticks (≈ milisegundos si SysTick = 1 kHz)	Contador de ticks pendientes para la tarea task_test.	Inicialmente 0. Se incrementa cada interrupción SysTick (cada 1 ms). Se decrementa en task_test_update() cada vez que se procesa un tick. En promedio oscila entre 0 y 1.
+⏱️ 4. Cronología desde el inicio
+Tiempo aproximado	Evento
+t = 0 ms	main() llama app_init(): se inicializan g_app_tick_cnt = 0, g_app_runtime_us = 0, task_dta_list[].WCET = 0, display inicializado.
+Cada 1 ms (SysTick)	ISR incrementa g_app_tick_cnt y g_task_test_tick_cnt.
+Loop principal (app_update)	Detecta g_app_tick_cnt > 0, ejecuta task_test_update(), mide su duración, actualiza g_app_runtime_us y WCET.
+Cada 1000 ticks (~1 s)	task_test_statechart() muestra en pantalla el contador (g_task_test_cnt / 1000).
+📺 5. display.c
+
+Solo implementa las funciones de control de un LCD tipo HD44780 (4 u 8 bits), permitiendo escribir texto y posiciones, no afecta directamente a las variables pedidas.
+
+✅ Resumen
+
+g_app_runtime_us → tiempo total de ejecución de tareas en cada iteración (µs), reinicia cada ciclo.
+
+task_dta_list[index].WCET → peor caso histórico de tiempo de ejecución (µs), solo crece si una tarea tarda más.
+
+g_task_test_tick_cnt → contador de ticks de la tarea test (ms aprox.), se incrementa por SysTick y se consume en task_test_update().
