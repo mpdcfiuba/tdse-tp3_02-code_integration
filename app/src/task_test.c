@@ -145,19 +145,18 @@ void task_test_update(void *parameters)
 void task_test_statechart(void)
 {
 	task_test_dta_t *p_task_test_dta;
-	char test_str[8];
+	char test_str[8] = "hola qt";
 
 	/* Update Task Test Configuration & Data Pointer */
     p_task_test_dta = &task_test_dta;
 
     if (DEL_TEST_XX_MIN < p_task_test_dta->tick)
 	{
-		p_task_test_dta->tick--;
+    	p_task_test_dta->tick--;
 	}
 	else
 	{
 		p_task_test_dta->tick = DEL_TEST_XX_MAX ;
-
 		/* Print out: LCD Display */
 		snprintf(test_str, sizeof(test_str), "%lu", (g_task_test_cnt/1000ul));
 		displayCharPositionWrite(10, 1);
